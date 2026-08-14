@@ -124,9 +124,13 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
   --collect-all av --collect-all huggingface_hub --collect-all tokenizers xyz2md_gui.py
 ```
 
-产物：`dist\xyz2md.exe`（单文件，约 250–400MB，包含全部运行库）。
+产物：`dist\xyz2md.exe`（单文件，约 90–400MB，包含全部运行库）。
 首次运行会在 exe 同目录的 `models/` 下自动下载模型权重（small 约 460MB），
 exe 可整体拷贝到别的 Windows 电脑直接使用（模型目录可一并拷贝，免去重复下载）。
+
+如果单文件版在受限环境（如沙箱/无 %TEMP% 写权限）启动报解压错误，
+可改用文件夹版：把上面命令的 `--onefile` 换成 `--onedir`，产物为
+`dist\xyz2md_dir\` 目录，启动无需解压，整个文件夹拷走即可。
 
 > 说明：exe 体积大是因为内置了离线语音识别引擎（ctranslate2/onnxruntime/PyAV）；
 > 转写全程本地进行，不依赖任何账号或网络服务（除首次下载模型）。
