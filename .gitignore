@@ -1,0 +1,14 @@
+# 虚拟环境 / 缓存 / 产物
+.venv/
+models/
+__pycache__/
+*.pyc
+
+# 运行产物
+out/
+scratch/
+
+# PyInstaller 构建
+build/
+dist/
+*.spec
