@@ -2,6 +2,27 @@
 
 把「小宇宙」播客单集链接一键转成带时间戳的 Markdown 文字稿文档。
 
+📦 仓库：https://github.com/AmazingBoyCrazy/xyz-md
+
+## 两种使用方式
+
+### 1. 图形界面（推荐，桌面软件）
+
+```powershell
+.\.venv\Scripts\python xyz2md_gui.py
+```
+
+窗口操作：粘贴单集链接 → 选模型/输出目录 → 点「开始转换」→ 实时查看进度日志 →
+完成后点「打开输出文件夹」。也可以打包成 exe 双击运行（见下文「打包」）。
+
+### 2. 命令行
+
+```powershell
+.\.venv\Scripts\python xyz2md.py https://www.xiaoyuzhoufm.com/episode/<eid>
+```
+
+打包后的 exe 也支持命令行模式：`xyz2md.exe --cli <链接> [选项]`
+
 ## 原理
 
 1. 抓取单集页面 (`https://www.xiaoyuzhoufm.com/episode/<eid>`)，解析
@@ -92,6 +113,23 @@ python -m venv .venv
 ```powershell
 $env:HF_ENDPOINT = "https://hf-mirror.com"
 ```
+
+## 打包成 exe（桌面软件）
+
+```powershell
+.\.venv\Scripts\python -m pip install pyinstaller
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name xyz2md `
+  --workpath build --distpath dist --specpath build `
+  --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime `
+  --collect-all av --collect-all huggingface_hub --collect-all tokenizers xyz2md_gui.py
+```
+
+产物：`dist\xyz2md.exe`（单文件，约 250–400MB，包含全部运行库）。
+首次运行会在 exe 同目录的 `models/` 下自动下载模型权重（small 约 460MB），
+exe 可整体拷贝到别的 Windows 电脑直接使用（模型目录可一并拷贝，免去重复下载）。
+
+> 说明：exe 体积大是因为内置了离线语音识别引擎（ctranslate2/onnxruntime/PyAV）；
+> 转写全程本地进行，不依赖任何账号或网络服务（除首次下载模型）。
 
 ## 注意
 
