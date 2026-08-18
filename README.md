@@ -4,6 +4,30 @@
 
 📦 仓库：https://github.com/AmazingBoyCrazy/xyz-md
 
+## 截图预览
+
+### 配置页 — 填链接、选目录、点开始
+
+![配置页](pictures/参数填写页面.png)
+
+### 转写页 — 封面 + 标题 + 进度条 + 日志
+
+![转写页](pictures/转录页面.png)
+
+### 输出效果 — Markdown 文档
+
+元数据 + 封面 + 时间轴分章节的文字稿：
+
+![MD 顶部元数据](pictures/示例_博客信息logo.png)
+
+简介区（嘉宾 / 时间轴 / 相关资料）：
+
+![MD 简介区](pictures/示例_博客shownotes.png)
+
+章节标题按时间轴插入：
+
+![MD 文字稿](pictures/示例_博客正文.png)
+
 ## 两种使用方式
 
 ### 1. 图形界面（推荐，桌面软件）
