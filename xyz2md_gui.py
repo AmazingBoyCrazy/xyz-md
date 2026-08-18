@@ -123,11 +123,39 @@ class App(ctk.CTk):
 
     def _run(self, cmd: list) -> None:
         try:
+            # 1) 预取元数据(标题/封面/时长等), 立刻推到主线程更新 UI
+            url = cmd[0]
+            try:
+                html = xyz2md.fetch(url).decode("utf-8", errors="replace")
+                meta = xyz2md.parse_page(html)
+                self.q.put(("meta", meta))
+                self.q.put(("cover", self._load_cover(meta.get("cover", ""))))
+                self.q.put(("log", f"[预取] 已加载元数据\n"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("meta", {"episode_title": "（元数据获取失败）"}))
+                self.q.put(("cover", None))
+                self.q.put(("log", f"[预取] 失败: {e}\n"))
+
+            # 2) 进入正式转换流程
             self.final_code = xyz2md.main(
                 cmd, stop_check=self.stop_event.is_set)
         except Exception as e:  # noqa: BLE001
             self.final_code = 1
             self.q.put(("log", f"\n[ERROR] {e!r}\n"))
+
+    def _load_cover(self, url: str):
+        """后台线程: 下载封面并转成 CTkImage; 失败返回 None"""
+        if not url:
+            return None
+        try:
+            from PIL import Image
+            import io
+            data = xyz2md.fetch(url, timeout=15).read()
+            img = Image.open(io.BytesIO(data)).convert("RGBA")
+            img.thumbnail((128, 128))
+            return ctk.CTkImage(light_image=img, dark_image=img, size=(72, 72))
+        except Exception:
+            return None
 
     def stop(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -142,6 +170,10 @@ class App(ctk.CTk):
                 if kind == "log":
                     self.progress_page.append_log(payload)
                     self.progress_page.apply_progress_line(payload)
+                elif kind == "meta":
+                    self.progress_page.set_meta(payload)
+                elif kind == "cover":
+                    self.progress_page.set_cover(payload)
         except queue.Empty:
             pass
 
@@ -367,6 +399,33 @@ class ProgressPage(ctk.CTkFrame):
 
     def set_status(self, text: str) -> None:
         self.status_label.configure(text=text)
+
+    def set_meta(self, meta: dict) -> None:
+        title = meta.get("episode_title") or "（未知标题）"
+        sub_parts = []
+        if meta.get("podcast"):
+            sub_parts.append(f"播客：{meta['podcast']}")
+        if meta.get("date_published"):
+            sub_parts.append(f"发布：{meta['date_published'].split('T')[0]}")
+        if meta.get("duration_sec"):
+            sec = int(meta["duration_sec"])
+            h, rem = divmod(sec, 3600)
+            m, _ = divmod(rem, 60)
+            if h:
+                sub_parts.append(f"时长：{h} 小时 {m} 分")
+            else:
+                sub_parts.append(f"时长：{m} 分")
+        self.title_label.configure(text=title)
+        self.subtitle_label.configure(text="  ·  ".join(sub_parts) or " ")
+
+    def set_cover(self, ctk_image) -> None:
+        if ctk_image is None:
+            self.cover_label.configure(
+                image="", text="🎙",
+                font=ctk.CTkFont(size=32),
+                text_color=("gray40", "gray70"))
+        else:
+            self.cover_label.configure(image=ctk_image, text="")
 
     def append_log(self, line: str) -> None:
         self.log_text.configure(state="normal")
