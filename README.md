@@ -8,12 +8,14 @@
 
 ### 1. 图形界面（推荐，桌面软件）
 
+基于 **CustomTkinter**（Win11/macOS 风格深/浅色主题）。双页切换：
+
+- **配置页**：粘贴链接 → 选输出目录 → 选模型 → 可选参数 → 「🚀 开始转换」
+- **转写页**：实时显示播客封面、单集标题、播客名；进度条 + 百分比 + 已用时/剩余；滚动日志；「⏹ 停止」/「📂 打开输出文件夹」按钮
+
 ```powershell
 .\.venv\Scripts\python xyz2md_gui.py
 ```
-
-窗口操作：粘贴单集链接 → 选模型/输出目录 → 点「开始转换」→ 实时查看进度日志 →
-完成后点「打开输出文件夹」。也可以打包成 exe 双击运行（见下文「打包」）。
 
 ### 2. 命令行
 
@@ -117,11 +119,12 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 ## 打包成 exe（桌面软件）
 
 ```powershell
-.\.venv\Scripts\python -m pip install pyinstaller
+.\.venv\Scripts\python -m pip install pyinstaller customtkinter
 .\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name xyz2md `
   --workpath build --distpath dist --specpath build `
   --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime `
-  --collect-all av --collect-all huggingface_hub --collect-all tokenizers xyz2md_gui.py
+  --collect-all av --collect-all huggingface_hub --collect-all tokenizers `
+  --collect-all customtkinter xyz2md_gui.py
 ```
 
 产物：`dist\xyz2md.exe`（单文件，约 90–400MB，包含全部运行库）。
