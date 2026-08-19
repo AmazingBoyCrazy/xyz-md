@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.request
@@ -105,6 +106,70 @@ def fetch(url: str, timeout: int = 60, referer: str = "https://www.xiaoyuzhoufm.
             log(f"  抓取失败(第{attempt}次): {e}")
             time.sleep(2)
     raise RuntimeError(f"抓取失败: {last_err}")
+
+
+def fetch_stream(url: str, dest: Path, chunk_size: int = 1 << 20,
+                 chunk_timeout: int = 30, retries: int = 2,
+                 progress_cb=None, referer: str = "https://www.xiaoyuzhoufm.com/") -> None:
+    """流式下载到文件: 每个 chunk 独立超时, 校验 Content-Length, 失败重试。
+
+    Args:
+        url: 下载地址
+        dest: 目标文件路径
+        chunk_size: 每次读取字节数 (默认 1MB)
+        chunk_timeout: 单个 chunk 读取超时 (秒)
+        retries: 失败重试次数
+        progress_cb: callback(received_bytes: int, total_bytes: int | None)
+    """
+    last_err = None
+    for attempt in range(1, retries + 2):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": UA,
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": referer,
+            })
+            with urllib.request.urlopen(req, timeout=chunk_timeout) as resp:
+                total = resp.headers.get("Content-Length")
+                total = int(total) if total else None
+                received = 0
+                if progress_cb:
+                    progress_cb(0, total)
+                with dest.open("wb") as f:
+                    while True:
+                        try:
+                            chunk = resp.read(chunk_size)
+                        except socket.timeout as e:
+                            raise RuntimeError(
+                                f"读取超时 (>{chunk_timeout}s 无数据, 已收 {received/1024/1024:.1f} MB)") from e
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        received += len(chunk)
+                        if progress_cb and received % (5 * chunk_size) < chunk_size:
+                            progress_cb(received, total)
+                if progress_cb:
+                    progress_cb(received, total)
+                # 校验 Content-Length
+                if total is not None and received != total:
+                    raise RuntimeError(
+                        f"下载不完整: 期望 {total/1024/1024:.1f} MB, 实际 {received/1024/1024:.1f} MB")
+                return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            # 清理半截文件
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt <= retries:
+                wait = 2 ** attempt
+                log(f"  下载失败(第{attempt}次, {wait}s 后重试): {e}")
+                time.sleep(wait)
+            else:
+                break
+    raise RuntimeError(f"下载失败 (重试 {retries} 次后): {last_err}")
 
 
 def get_meta(html: str, prop: str) -> str | None:
@@ -295,10 +360,20 @@ def slug(name: str, max_len: int = 60) -> str:
 
 
 def download_audio(url: str, dest: Path) -> None:
+    """下载音频 (流式 + Content-Length 校验 + 超时重试)"""
     log(f"下载音频: {url}")
-    data = fetch(url, timeout=120, referer="https://www.xiaoyuzhoufm.com/")
-    dest.write_bytes(data)
-    log(f"音频已保存: {dest} ({len(data) / 1024 / 1024:.1f} MB)")
+
+    def _on_progress(received: int, total: int | None):
+        if total:
+            log(f"  下载中: {received/1024/1024:.1f} / {total/1024/1024:.1f} MB "
+                f"({received*100/total:.0f}%)")
+        else:
+            log(f"  下载中: {received/1024/1024:.1f} MB")
+
+    fetch_stream(url, dest, progress_cb=_on_progress,
+                 referer="https://www.xiaoyuzhoufm.com/")
+    size_mb = dest.stat().st_size / 1024 / 1024
+    log(f"音频已保存: {dest} ({size_mb:.1f} MB)")
 
 
 def transcribe(audio_path: Path, model_size: str, lang: str | None,
