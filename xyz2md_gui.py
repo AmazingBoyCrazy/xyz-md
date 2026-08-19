@@ -150,7 +150,7 @@ class App(ctk.CTk):
         try:
             from PIL import Image
             import io
-            data = xyz2md.fetch(url, timeout=15).read()
+            data = xyz2md.fetch(url, timeout=15)  # 返回 bytes
             img = Image.open(io.BytesIO(data)).convert("RGBA")
             img.thumbnail((128, 128))
             return ctk.CTkImage(light_image=img, dark_image=img, size=(72, 72))
@@ -289,6 +289,7 @@ class ProgressPage(ctk.CTkFrame):
         self.on_back = on_back
         self._start_ts = None
         self._app = None
+        self.current_cover = None  # 持有 CTkImage 防止被 GC
 
         topbar = ctk.CTkFrame(self, fg_color="transparent")
         topbar.pack(fill="x", padx=20, pady=(16, 0))
@@ -419,6 +420,8 @@ class ProgressPage(ctk.CTkFrame):
         self.subtitle_label.configure(text="  ·  ".join(sub_parts) or " ")
 
     def set_cover(self, ctk_image) -> None:
+        # 必须持有引用, 否则 CTkImage(PIL image) 会被 GC 导致图像消失
+        self.current_cover = ctk_image
         if ctk_image is None:
             self.cover_label.configure(
                 image="", text="🎙",
@@ -482,11 +485,13 @@ def main() -> int:
     if "--smoke" in sys.argv:
         app.after(2000, app.destroy)
     if "--auto" in sys.argv:
+        # rest[0] 是 URL, rest[1:] 是 --key value 对(可能缺漏)
         i = sys.argv.index("--auto")
         rest = sys.argv[i + 1:]
-        app.config_page.url_var.set(rest[0] if rest else "")
-        for j in range(1, len(rest), 2):
-            k, v = rest[j], rest[j + 1]
+        url = rest[0] if rest else ""
+        app.config_page.url_var.set(url)
+        # 用 zip 处理成对的 kv, 奇数尾部自动忽略
+        for k, v in zip(rest[1::2], rest[2::2]):
             if k == "--limit-minutes":
                 app.config_page.limit_var.set(v)
             elif k == "--model":
