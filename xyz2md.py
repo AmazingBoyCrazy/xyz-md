@@ -52,6 +52,22 @@ LOG_HOOK = None  # 可由 GUI 注入, 接收格式化后的日志行
 class StopTranscription(Exception):
     """用户主动停止转写"""
 
+
+_opencc = None  # 延迟加载: opencc.OpenCC('t2s')
+
+
+def _get_opencc():
+    """返回 opencc 转换器实例, 未安装时返回 None (静默跳过)"""
+    global _opencc
+    if _opencc is not None:
+        return _opencc
+    try:
+        from opencc import OpenCC
+        _opencc = OpenCC("t2s")
+    except ImportError:
+        _opencc = False
+    return _opencc
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 PAGE_URL = "https://www.xiaoyuzhoufm.com/episode/{eid}"
@@ -372,6 +388,10 @@ def write_markdown(meta: dict, segments_iter, md_path: Path,
         text = re.sub(r"\s+", " ", seg.text or "").strip()
         if not text:
             return
+        # 繁简转换 (opencc 未安装时静默跳过)
+        cc = _get_opencc()
+        if cc:
+            text = cc.convert(text)
         f.write(f"**[{fmt_ts(seg.start)} → {fmt_ts(seg.end)}]** {text}\n\n")
 
     timeline = meta.get("timeline") or []

@@ -10,15 +10,18 @@
     --smoke            构建窗口后 2 秒自动关闭
     --auto <url> ...   自动开始转换, 完成后自动关闭
 """
+import json
 import queue
 import sys
 import threading
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 import xyz2md
+import xyz2md_polish
 
 # ---------- 命令行模式(打包后: xyz2md.exe --cli <url> [选项]) ----------
 if "--cli" in sys.argv:
@@ -69,6 +72,10 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.final_code = 0
+        self._start_ts: float | None = None
+        self._last_meta: dict = {}
+        self._last_md_path: str = ""
+        self._last_segment_count: int = 0
 
         self.container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
@@ -77,11 +84,17 @@ class App(ctk.CTk):
 
         self.config_page = ConfigPage(self.container, on_start=self._start_convert)
         self.progress_page = ProgressPage(self.container, on_back=self._go_config)
+        self.beautify_page = BeautifyPage(
+            self.container,
+            on_back=self._go_config,
+            on_open_folder=self._open_output_folder)
 
         self.config_page.grid(row=0, column=0, sticky="nsew")
         self.progress_page.grid(row=0, column=0, sticky="nsew")
+        self.beautify_page.grid(row=0, column=0, sticky="nsew")
 
         self.progress_page.bind_app(self)
+        self.beautify_page.bind_app(self)
         self._show(self.config_page)
 
     def _show(self, page) -> None:
@@ -111,6 +124,7 @@ class App(ctk.CTk):
 
         self.stop_event.clear()
         self.final_code = 0
+        self._start_ts = time.time()
         self.progress_page._reset_for_new_run()
         self.progress_page.set_status("准备中...")
         self._show(self.progress_page)
@@ -128,11 +142,13 @@ class App(ctk.CTk):
             try:
                 html = xyz2md.fetch(url).decode("utf-8", errors="replace")
                 meta = xyz2md.parse_page(html)
+                self._last_meta = meta
                 self.q.put(("meta", meta))
                 self.q.put(("cover", self._load_cover(meta.get("cover", ""))))
                 self.q.put(("log", f"[预取] 已加载元数据\n"))
             except Exception as e:  # noqa: BLE001
-                self.q.put(("meta", {"episode_title": "（元数据获取失败）"}))
+                self._last_meta = {"episode_title": "（元数据获取失败）"}
+                self.q.put(("meta", self._last_meta))
                 self.q.put(("cover", None))
                 self.q.put(("log", f"[预取] 失败: {e}\n"))
 
@@ -170,6 +186,14 @@ class App(ctk.CTk):
                 if kind == "log":
                     self.progress_page.append_log(payload)
                     self.progress_page.apply_progress_line(payload)
+                    # 解析 md_path 和段数
+                    import re as _re
+                    m = _re.search(r"Markdown:\s+(.+)", payload)
+                    if m:
+                        self._last_md_path = m.group(1).strip()
+                    m2 = _re.search(r"共\s+(\d+)\s+段", payload)
+                    if m2:
+                        self._last_segment_count = int(m2.group(1))
                 elif kind == "meta":
                     self.progress_page.set_meta(payload)
                 elif kind == "cover":
@@ -179,16 +203,37 @@ class App(ctk.CTk):
 
         if self.worker and not self.worker.is_alive():
             self.worker = None
-            self.progress_page.set_status(
-                "✅ 完成" if self.final_code == 0 and not self.stop_event.is_set()
-                else ("⏹ 已停止" if self.stop_event.is_set() else "❌ 失败"))
-            self.progress_page.set_buttons(running=False, stopping=False,
-                                           finished=True)
+            success = self.final_code == 0 and not self.stop_event.is_set()
+            if success and self._last_md_path and Path(self._last_md_path).exists():
+                # 跳转到美化页
+                elapsed = (time.time() - self._start_ts) if self._start_ts else 0
+                self.beautify_page.set_result(
+                    self._last_meta, self._last_md_path,
+                    self._last_segment_count, elapsed)
+                self._show(self.beautify_page)
+            else:
+                # 失败/停止 → 留在转写页
+                self.progress_page.set_status(
+                    "⏹ 已停止" if self.stop_event.is_set() else "❌ 失败")
+                self.progress_page.set_buttons(running=False, stopping=False,
+                                               finished=True)
             # --auto 模式下自动销毁窗口
             if "--auto" in sys.argv:
                 self.after(500, self.destroy)
             return
         self.after(80, self._drain)
+
+    def _open_output_folder(self) -> None:
+        """打开输出目录"""
+        out_dir = Path(self.config_page.out_var.get())
+        if not out_dir.exists():
+            messagebox.showwarning("提示", f"目录不存在:\n{out_dir}")
+            return
+        try:
+            import os
+            os.startfile(str(out_dir))
+        except OSError as e:  # noqa: BLE001
+            messagebox.showerror("错误", f"无法打开文件夹:\n{e}")
 
 
 class ConfigPage(ctk.CTkFrame):
@@ -477,6 +522,337 @@ class ProgressPage(ctk.CTkFrame):
         ]:
             if key in line:
                 self.status_label.configure(text=text)
+
+
+# ============================================================================
+# 美化页 (第三页)
+# ============================================================================
+class BeautifyPage(ctk.CTkFrame):
+    def __init__(self, master, on_back, on_open_folder) -> None:
+        super().__init__(master, corner_radius=0, fg_color="transparent")
+        self.on_back = on_back
+        self.on_open_folder = on_open_folder
+        self._app = None
+        self._start_ts: float | None = None
+        self._polish_worker: threading.Thread | None = None
+        self._polish_stop = threading.Event()
+        self._polish_q: queue.Queue = queue.Queue()
+        self._api_config: dict = {}
+
+        # 顶部: 返回
+        topbar = ctk.CTkFrame(self, fg_color="transparent")
+        topbar.pack(fill="x", padx=20, pady=(16, 0))
+        ctk.CTkButton(topbar, text="← 返回", width=80, height=32,
+                      command=self.on_back, fg_color="transparent",
+                      border_width=1, text_color=("gray20", "gray80")).pack(side="left")
+
+        # 完成信息卡
+        self.done_card = ctk.CTkFrame(self, corner_radius=12)
+        self.done_card.pack(fill="x", padx=20, pady=(14, 10))
+        ctk.CTkLabel(self.done_card, text="✅ 转换完成",
+                     font=ctk.CTkFont(size=20, weight="bold"),
+                     text_color="#27ae60").pack(anchor="w", padx=16, pady=(14, 4))
+        self.title_label = ctk.CTkLabel(self.done_card, text="",
+                                        font=ctk.CTkFont(size=15, weight="bold"),
+                                        anchor="w", wraplength=680)
+        self.title_label.pack(fill="x", padx=16, anchor="w")
+        self.subtitle_label = ctk.CTkLabel(self.done_card, text="",
+                                           text_color=("gray40", "gray60"),
+                                           anchor="w")
+        self.subtitle_label.pack(fill="x", padx=16, anchor="w", pady=(2, 12))
+
+        # 繁简转换区
+        card_t2s = ctk.CTkFrame(self, corner_radius=12)
+        card_t2s.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(card_t2s, text="繁简转换",
+                     font=ctk.CTkFont(weight="bold"),
+                     anchor="w").pack(fill="x", padx=16, pady=(12, 4))
+        self.t2s_status = ctk.CTkLabel(card_t2s, text="", anchor="w")
+        self.t2s_status.pack(fill="x", padx=16, pady=(0, 10))
+
+        # API 精修区
+        card_api = ctk.CTkFrame(self, corner_radius=12)
+        card_api.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        ctk.CTkLabel(card_api, text="API 精修（加标点 + 纠错 + 统一简体）",
+                     font=ctk.CTkFont(weight="bold"),
+                     anchor="w").pack(fill="x", padx=16, pady=(12, 6))
+
+        # 提供商 + API Key
+        row1 = ctk.CTkFrame(card_api, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(row1, text="服务商").pack(side="left")
+        self.provider_var = ctk.StringVar(value="DeepSeek")
+        self.provider_menu = ctk.CTkComboBox(
+            row1, variable=self.provider_var, width=160,
+            values=list(xyz2md_polish.PROVIDERS.keys()),
+            command=self._on_provider_change)
+        self.provider_menu.pack(side="left", padx=(6, 0))
+
+        row2 = ctk.CTkFrame(card_api, fg_color="transparent")
+        row2.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(row2, text="API Key").pack(side="left")
+        self.key_var = ctk.StringVar()
+        self.key_entry = ctk.CTkEntry(row2, textvariable=self.key_var,
+                                      placeholder_text="sk-...", show="•",
+                                      width=300)
+        self.key_entry.pack(side="left", padx=(6, 6))
+        self.save_btn = ctk.CTkButton(row2, text="保存", width=70,
+                                      command=self._save_api_config)
+        self.save_btn.pack(side="left")
+
+        row3 = ctk.CTkFrame(card_api, fg_color="transparent")
+        row3.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(row3, text="模型").pack(side="left")
+        self.model_var = ctk.StringVar(value="deepseek-chat")
+        self.model_entry = ctk.CTkEntry(row3, textvariable=self.model_var,
+                                        width=200)
+        self.model_entry.pack(side="left", padx=(6, 0))
+
+        # 自定义 base_url (默认隐藏, 选"自定义"时显示)
+        self.custom_row = ctk.CTkFrame(card_api, fg_color="transparent")
+        ctk.CTkLabel(self.custom_row, text="Base URL").pack(side="left")
+        self.base_url_var = ctk.StringVar()
+        ctk.CTkEntry(self.custom_row, textvariable=self.base_url_var,
+                     placeholder_text="https://api.example.com",
+                     width=300).pack(side="left", padx=(6, 0))
+
+        # 进度 + 状态
+        self.status_label = ctk.CTkLabel(card_api, text="",
+                                         text_color=("gray40", "gray60"),
+                                         anchor="w")
+        self.status_label.pack(fill="x", padx=16, pady=(6, 4))
+
+        self.progress_bar = ctk.CTkProgressBar(card_api, height=8)
+        self.progress_bar.set(0)
+
+        # 操作按钮行
+        btn_row = ctk.CTkFrame(card_api, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(6, 12))
+        self.polish_btn = ctk.CTkButton(btn_row, text="🚀 开始精修", width=120,
+                                        command=self._start_polish)
+        self.polish_btn.pack(side="left")
+        self.stop_btn = ctk.CTkButton(btn_row, text="⏹ 停止", width=80,
+                                      fg_color="#c0392b", hover_color="#a93226",
+                                      state="disabled",
+                                      command=self._stop_polish)
+        self.stop_btn.pack(side="left", padx=(8, 0))
+        self.open_btn = ctk.CTkButton(btn_row, text="📄 打开精修文档", width=140,
+                                      state="disabled",
+                                      command=self._open_polished)
+        self.open_btn.pack(side="right")
+
+        # 日志区
+        self.log_text = ctk.CTkTextbox(card_api, font=("Consolas", 10),
+                                       height=120, state="disabled", wrap="word")
+        self.log_text.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        # 底部: 打开输出文件夹
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(fill="x", padx=20, pady=(0, 16))
+        ctk.CTkButton(bottom, text="📂 打开输出文件夹", width=160,
+                      command=self.on_open_folder).pack(side="left")
+
+    def bind_app(self, app) -> None:
+        self._app = app
+
+    # ---------- 填充数据 ----------
+    def set_result(self, meta: dict, md_path: str, segment_count: int,
+                   elapsed_sec: float) -> None:
+        self.title_label.configure(text=meta.get("episode_title") or "")
+        sub_parts = []
+        if meta.get("podcast"):
+            sub_parts.append(f"播客：{meta['podcast']}")
+        if segment_count:
+            sub_parts.append(f"{segment_count} 段")
+        if elapsed_sec:
+            m, s = divmod(int(elapsed_sec), 60)
+            sub_parts.append(f"耗时 {m}m{s}s")
+        self.subtitle_label.configure(text=" · ".join(sub_parts))
+        self._md_path = md_path
+        self._segment_count = segment_count
+
+        # 繁简转换状态
+        if xyz2md._get_opencc():
+            self.t2s_status.configure(
+                text="✅ 已自动转换为简体中文（opencc 转换已嵌入 write_seg）")
+        else:
+            self.t2s_status.configure(
+                text="⚠️ opencc 未安装, 未执行繁简转换 (pip install opencc-python-reimplemented)")
+
+        # 加载 API 配置
+        self._api_config = self._load_api_config()
+        if self._api_config:
+            self.provider_var.set(self._api_config.get("provider", "DeepSeek"))
+            self.key_var.set(self._api_config.get("api_key", ""))
+            self.model_var.set(self._api_config.get("model", ""))
+            self.base_url_var.set(self._api_config.get("base_url", ""))
+            self._on_provider_change(self.provider_var.get())
+
+    # ---------- API 配置 ----------
+    def _load_api_config(self) -> dict:
+        config_path = xyz2md.BASE_DIR / "config.json"
+        if config_path.exists():
+            try:
+                return json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                pass
+        return {}
+
+    def _save_api_config(self) -> None:
+        cfg = {
+            "provider": self.provider_var.get(),
+            "api_key": self.key_var.get().strip(),
+            "model": self.model_var.get().strip(),
+            "base_url": self._current_base_url(),
+        }
+        config_path = xyz2md.BASE_DIR / "config.json"
+        try:
+            config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
+            self._append_log(f"✅ 配置已保存到 {config_path}\n")
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("错误", f"保存配置失败:\n{e}")
+
+    def _current_base_url(self) -> str:
+        provider = self.provider_var.get()
+        if provider == "自定义":
+            return self.base_url_var.get().strip()
+        return xyz2md_polish.PROVIDERS.get(provider, {}).get("base_url", "")
+
+    def _on_provider_change(self, value: str) -> None:
+        if value == "自定义":
+            self.custom_row.pack(fill="x", padx=16, pady=(0, 6),
+                                 after=self.model_entry.master)
+        else:
+            self.custom_row.pack_forget()
+            preset = xyz2md_polish.PROVIDERS.get(value, {})
+            self.model_var.set(preset.get("model", ""))
+            self.base_url_var.set(preset.get("base_url", ""))
+
+    # ---------- 精修 ----------
+    def _start_polish(self) -> None:
+        if not getattr(self, "_md_path", None) or not Path(self._md_path).exists():
+            messagebox.showwarning("提示", "找不到原始 MD 文件")
+            return
+        api_key = self.key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("提示", "请先填写 API Key")
+            return
+        base_url = self._current_base_url()
+        if not base_url:
+            messagebox.showwarning("提示", "请填写 Base URL (选择「自定义」时)")
+            return
+        model = self.model_var.get().strip()
+        if not model:
+            messagebox.showwarning("提示", "请填写模型名称")
+            return
+
+        # 自动保存配置
+        self._save_api_config()
+
+        # 读 segments
+        segments = xyz2md_polish.read_segments_from_md(self._md_path)
+        if not segments:
+            messagebox.showwarning("提示", "MD 中没有可处理的文字段")
+            return
+
+        # 计算输出路径
+        md_path = Path(self._md_path)
+        polished_path = md_path.with_name(md_path.stem + "_精修" + md_path.suffix)
+        self._polished_path = str(polished_path)
+
+        # 重置 UI
+        self._polish_stop.clear()
+        self.progress_bar.set(0)
+        self.progress_bar.pack(fill="x", padx=16, pady=(0, 6),
+                               after=self.status_label)
+        self.status_label.configure(
+            text=f"准备精修 {len(segments)} 段, 输出到 {polished_path.name}")
+        self._append_log(f"\n========== 开始精修 ==========\n")
+        self.polish_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.open_btn.configure(state="disabled")
+
+        # 启动后台线程
+        self._polish_worker = threading.Thread(
+            target=self._run_polish,
+            args=(segments, api_key, base_url, model),
+            daemon=True)
+        self._polish_worker.start()
+        self.after(80, self._poll_polish)
+
+    def _stop_polish(self) -> None:
+        if self._polish_worker and self._polish_worker.is_alive():
+            self._polish_stop.set()
+            self._append_log(">>> 正在停止精修...\n")
+            self.stop_btn.configure(state="disabled")
+
+    def _run_polish(self, segments, api_key, base_url, model) -> None:
+        try:
+            results = xyz2md_polish.polish_segments(
+                segments, api_key, base_url, model,
+                concurrency=5,
+                progress_cb=lambda c, t: self._polish_q.put(
+                    ("progress", (c, t))),
+                log_cb=lambda m: self._polish_q.put(("log", m + "\n")),
+                should_stop=self._polish_stop.is_set)
+            # 写入文件
+            xyz2md_polish.write_polished_md(self._md_path, results,
+                                            self._polished_path)
+            self._polish_q.put(("done", (True, self._polished_path)))
+        except Exception as e:  # noqa: BLE001
+            self._polish_q.put(("log", f"❌ 精修异常: {e!r}\n"))
+            self._polish_q.put(("done", (False, "")))
+
+    def _poll_polish(self) -> None:
+        # 处理队列
+        try:
+            import queue as _q
+            while True:
+                kind, payload = self._polish_q.get_nowait()
+                if kind == "progress":
+                    c, t = payload
+                    self.progress_bar.set(c / t if t else 0)
+                    self.status_label.configure(
+                        text=f"精修中: {c}/{t} 段 ({int(c*100/t)}%)")
+                elif kind == "log":
+                    self._append_log(payload)
+                elif kind == "done":
+                    success, path = payload
+                    self.progress_bar.pack_forget()
+                    if success:
+                        self.status_label.configure(text="✅ 精修完成")
+                        self._append_log(f"\n✅ 精修结果已写入: {path}\n")
+                        self.open_btn.configure(state="normal")
+                    else:
+                        self.status_label.configure(text="❌ 精修失败")
+                    self.polish_btn.configure(state="normal")
+                    self.stop_btn.configure(state="disabled")
+                    self._polish_worker = None
+                    return
+        except _q.Empty:
+            pass
+        if self._polish_worker and self._polish_worker.is_alive():
+            self.after(80, self._poll_polish)
+        else:
+            self.after(80, self._poll_polish)
+
+    def _open_polished(self) -> None:
+        path = getattr(self, "_polished_path", None)
+        if not path or not Path(path).exists():
+            messagebox.showwarning("提示", "精修文档不存在")
+            return
+        try:
+            import os
+            os.startfile(str(path))
+        except OSError as e:  # noqa: BLE001
+            messagebox.showerror("错误", f"无法打开文件:\n{e}")
+
+    def _append_log(self, text: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", text)
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
 
 
 def main() -> int:
