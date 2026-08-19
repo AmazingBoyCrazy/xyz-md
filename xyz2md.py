@@ -80,7 +80,10 @@ EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]"
 
 def log(msg: str) -> None:
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
     if LOG_HOOK:
         try:
             LOG_HOOK(line)
@@ -472,29 +475,50 @@ def write_markdown(meta: dict, segments_iter, md_path: Path,
     timeline = meta.get("timeline") or []
     ch = 0
     count = 0
-    with md_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-        it = iter(segments_iter)
-        first = next(it, None)
-        if first is not None:
-            if stop_check is not None and stop_check():
-                raise StopTranscription()
-            # 首个分段之前的时间轴章节
-            while ch < len(timeline) and timeline[ch][0] <= first.start:
-                f.write(f"### {fmt_ts(timeline[ch][0])} {timeline[ch][1]}\n\n")
-                ch += 1
-            write_seg(f, first)
-            count += 1
-            for seg in it:
+
+    # 第一步: 立即写入 header, 即使后面转写挂了也能保留元数据
+    try:
+        with md_path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+            f.write("\n")
+            f.flush()
+        log(f"  MD header 已写入: {md_path}")
+    except Exception as e:  # noqa: BLE001
+        log(f"  写入 MD header 失败: {e}")
+        raise
+
+    # 第二步: 追加「## 文字稿」标题, 然后迭代 segments
+    try:
+        with md_path.open("a", encoding="utf-8") as f:
+            f.write("## 文字稿\n\n")
+            it = iter(segments_iter)
+            first = next(it, None)
+            if first is not None:
                 if stop_check is not None and stop_check():
                     raise StopTranscription()
-                while ch < len(timeline) and timeline[ch][0] <= seg.start:
+                # 首个分段之前的时间轴章节
+                while ch < len(timeline) and timeline[ch][0] <= first.start:
                     f.write(f"### {fmt_ts(timeline[ch][0])} {timeline[ch][1]}\n\n")
                     ch += 1
-                write_seg(f, seg)
+                write_seg(f, first)
                 count += 1
-                if count % 20 == 0:
-                    log(f"  已转写 {count} 段, 进度到 {fmt_ts(seg.end)} / 共 {fmt_duration(meta['duration_sec'])}")
+                for seg in it:
+                    if stop_check is not None and stop_check():
+                        raise StopTranscription()
+                    while ch < len(timeline) and timeline[ch][0] <= seg.start:
+                        f.write(f"### {fmt_ts(timeline[ch][0])} {timeline[ch][1]}\n\n")
+                        ch += 1
+                    write_seg(f, seg)
+                    count += 1
+                    if count % 20 == 0:
+                        log(f"  已转写 {count} 段, 进度到 {fmt_ts(seg.end)} / 共 {fmt_duration(meta['duration_sec'])}")
+    except StopTranscription:
+        raise
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        log(f"  转写过程异常: {e!r}")
+        log(f"  traceback: {traceback.format_exc()}")
+        # 不抛出, 保留已写入的部分
     return count
 
 
@@ -553,10 +577,13 @@ def main(argv: list | None = None, stop_check=None) -> int:
         download_audio(meta["audio_url"], audio_path)
         audio_name = audio_path.name
 
-    # 元数据 JSON
-    (out_dir / f"{eid}.json").write_text(
-        json.dumps({**meta, "eid": eid}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
+    # 元数据 JSON (失败不影响转写)
+    try:
+        (out_dir / f"{eid}.json").write_text(
+            json.dumps({**meta, "eid": eid}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log(f"  写入元数据 JSON 失败(忽略): {e}")
 
     md_path = out_dir / f"{eid}_{slug(meta['episode_title'])}.md"
 

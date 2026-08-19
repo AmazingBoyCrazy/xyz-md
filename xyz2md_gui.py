@@ -136,6 +136,7 @@ class App(ctk.CTk):
         self.after(80, self._drain)
 
     def _run(self, cmd: list) -> None:
+        import traceback as _tb
         try:
             # 1) 预取元数据(标题/封面/时长等), 立刻推到主线程更新 UI
             url = cmd[0]
@@ -153,11 +154,14 @@ class App(ctk.CTk):
                 self.q.put(("log", f"[预取] 失败: {e}\n"))
 
             # 2) 进入正式转换流程
+            self.q.put(("log", "[转写] 开始\n"))
             self.final_code = xyz2md.main(
                 cmd, stop_check=self.stop_event.is_set)
+            self.q.put(("log", f"[转写] main 返回: code={self.final_code}\n"))
         except Exception as e:  # noqa: BLE001
             self.final_code = 1
-            self.q.put(("log", f"\n[ERROR] {e!r}\n"))
+            tb = _tb.format_exc()
+            self.q.put(("log", f"\n[ERROR] {e!r}\n[tb]\n{tb}\n"))
 
     def _load_cover(self, url: str):
         """后台线程: 下载封面并转成 CTkImage; 失败返回 None"""
@@ -204,6 +208,12 @@ class App(ctk.CTk):
         if self.worker and not self.worker.is_alive():
             self.worker = None
             success = self.final_code == 0 and not self.stop_event.is_set()
+            # 诊断信息
+            self.q.put(("log",
+                f"[诊断] worker 结束, final_code={self.final_code}, "
+                f"stop_event={self.stop_event.is_set()}, "
+                f"md_path={self._last_md_path!r}, "
+                f"exists={self._last_md_path and Path(self._last_md_path).exists()}\n"))
             if success and self._last_md_path and Path(self._last_md_path).exists():
                 # 跳转到美化页
                 elapsed = (time.time() - self._start_ts) if self._start_ts else 0

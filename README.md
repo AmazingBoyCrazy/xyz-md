@@ -149,8 +149,16 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
   --workpath build --distpath dist --specpath build `
   --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime `
   --collect-all av --collect-all huggingface_hub --collect-all tokenizers `
-  --collect-all customtkinter --collect-all PIL --collect-data opencc xyz2md_gui.py
+  --collect-all customtkinter --collect-all PIL --collect-data opencc `
+  --add-data "D:\ADP\dsh\dshwork\xyz2md\xyz2md.py;." `
+  --add-data "D:\ADP\dsh\dshwork\xyz2md\xyz2md_polish.py;." `
+  --hidden-import xyz2md --hidden-import xyz2md_polish `
+  xyz2md_gui.py
 ```
+
+> ⚠️ `--add-data` 和 `--hidden-import` 必须显式指定 xyz2md.py 和 xyz2md_polish.py，
+> 它们是同目录的本地模块，PyInstaller 6.x 在某些环境下默认扫描不到，
+> 导致 exe 启动报 `ModuleNotFoundError: No module named 'xyz2md'`。
 
 产物：`dist\xyz2md.exe`（单文件，约 90–400MB，包含全部运行库）。
 首次运行会在 exe 同目录的 `models/` 下自动下载模型权重（small 约 460MB），
