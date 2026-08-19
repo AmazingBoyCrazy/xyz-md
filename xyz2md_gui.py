@@ -76,6 +76,7 @@ class App(ctk.CTk):
         self._last_meta: dict = {}
         self._last_md_path: str = ""
         self._last_segment_count: int = 0
+        self._last_cmd: list = []
 
         self.container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
@@ -125,6 +126,9 @@ class App(ctk.CTk):
         self.stop_event.clear()
         self.final_code = 0
         self._start_ts = time.time()
+        self._last_cmd = cmd
+        self._last_md_path = ""
+        self._last_segment_count = 0
         self.progress_page._reset_for_new_run()
         self.progress_page.set_status("准备中...")
         self._show(self.progress_page)
@@ -208,12 +212,15 @@ class App(ctk.CTk):
         if self.worker and not self.worker.is_alive():
             self.worker = None
             success = self.final_code == 0 and not self.stop_event.is_set()
-            # 诊断信息
-            self.q.put(("log",
+            # 兜底: 日志里没解析到 md 路径时, 直接从输出目录找本次单集的 md
+            if success and not self._last_md_path:
+                self._last_md_path = self._find_md_from_cmd()
+            # 直接写日志(不能 put 进队列, 本函数即将 return 不再 drain)
+            self.progress_page.append_log(
                 f"[诊断] worker 结束, final_code={self.final_code}, "
                 f"stop_event={self.stop_event.is_set()}, "
                 f"md_path={self._last_md_path!r}, "
-                f"exists={self._last_md_path and Path(self._last_md_path).exists()}\n"))
+                f"exists={bool(self._last_md_path) and Path(self._last_md_path).exists()}\n")
             if success and self._last_md_path and Path(self._last_md_path).exists():
                 # 跳转到美化页
                 elapsed = (time.time() - self._start_ts) if self._start_ts else 0
@@ -227,11 +234,32 @@ class App(ctk.CTk):
                     "⏹ 已停止" if self.stop_event.is_set() else "❌ 失败")
                 self.progress_page.set_buttons(running=False, stopping=False,
                                                finished=True)
+                if self.final_code == 0:
+                    self.final_code = 1  # 让 --auto 模式能感知 UI 判定失败
             # --auto 模式下自动销毁窗口
             if "--auto" in sys.argv:
                 self.after(500, self.destroy)
             return
         self.after(80, self._drain)
+
+    def _find_md_from_cmd(self) -> str:
+        """兜底: 从本次 cmd 推算输出 md 路径(不依赖日志正则解析)。"""
+        try:
+            url = self._last_cmd[0] if self._last_cmd else ""
+            m = xyz2md.EPISODE_RE.search(url)
+            if not m:
+                return ""
+            if "--out" in self._last_cmd:
+                out_dir = Path(self._last_cmd[self._last_cmd.index("--out") + 1])
+            else:
+                out_dir = xyz2md.BASE_DIR / "out"
+            cands = [p for p in out_dir.glob(f"{m.group(1)}_*.md")
+                     if not p.stem.endswith("_精修")]
+            if not cands:
+                return ""
+            return str(max(cands, key=lambda p: p.stat().st_mtime))
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _open_output_folder(self) -> None:
         """打开输出目录"""
@@ -344,6 +372,7 @@ class ProgressPage(ctk.CTkFrame):
         self.on_back = on_back
         self._start_ts = None
         self._app = None
+        self._audio_total_sec = None  # 实际转写的音频时长(限转时小于整集时长)
         self.current_cover = None  # 持有 CTkImage 防止被 GC
 
         topbar = ctk.CTkFrame(self, fg_color="transparent")
@@ -433,6 +462,7 @@ class ProgressPage(ctk.CTkFrame):
 
     def _reset_for_new_run(self) -> None:
         self._start_ts = None
+        self._audio_total_sec = None
         self.progress_bar.set(0)
         self.progress_pct.configure(text="0%")
         self.status_label.configure(text="准备中...")
@@ -503,7 +533,8 @@ class ProgressPage(ctk.CTkFrame):
             hh, mm, ss = int(m.group(2)), int(m.group(3)), int(m.group(4))
             cur_sec = hh * 3600 + mm * 60 + ss
             human = m.group(5).strip()
-            total_sec = _parse_human_duration(human)
+            # 限转时用实际音频时长做分母, 否则进度条到不了 100%
+            total_sec = self._audio_total_sec or _parse_human_duration(human)
             if total_sec > 0:
                 pct = min(cur_sec / total_sec, 1.0)
                 self.progress_bar.set(pct)
@@ -513,14 +544,17 @@ class ProgressPage(ctk.CTkFrame):
                 if pct > 0.01:
                     eta_sec = elapsed * (1 - pct) / pct
                     eta = f" · 剩余 {fmt_dur_short(eta_sec)}"
+                total_disp = (f"{self._audio_total_sec // 60} 分钟"
+                              if self._audio_total_sec else human)
                 self.status_label.configure(
-                    text=f"已转写 {seg_n} 段 · {cur_sec/60:.1f} 分钟 / {human}{eta}")
+                    text=f"已转写 {seg_n} 段 · {cur_sec/60:.1f} 分钟 / {total_disp}{eta}")
             return
 
         m2 = re.search(r"检测语言:\s*(\S+).*?音频时长\s*(\d+)s", line)
         if m2:
+            self._audio_total_sec = int(m2.group(2))
             self.status_label.configure(
-                text=f"检测到语言 {m2.group(1)}, 时长 {int(m2.group(2))//60} 分钟")
+                text=f"检测到语言 {m2.group(1)}, 时长 {self._audio_total_sec//60} 分钟")
 
         for key, text in [
             ("抓取单集页面", "抓取单集页面..."),

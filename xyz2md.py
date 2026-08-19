@@ -487,10 +487,9 @@ def write_markdown(meta: dict, segments_iter, md_path: Path,
         log(f"  写入 MD header 失败: {e}")
         raise
 
-    # 第二步: 追加「## 文字稿」标题, 然后迭代 segments
+    # 第二步: 追加转写内容 (「## 文字稿」标题已在 header 中写入)
     try:
         with md_path.open("a", encoding="utf-8") as f:
-            f.write("## 文字稿\n\n")
             it = iter(segments_iter)
             first = next(it, None)
             if first is not None:
@@ -540,8 +539,8 @@ def main(argv: list | None = None, stop_check=None) -> int:
 
     m = EPISODE_RE.search(args.url)
     if not m:
-        print(f"无法从链接中解析单集 ID: {args.url}\n"
-              f"链接格式应为 https://www.xiaoyuzhoufm.com/episode/<eid>")
+        log(f"无法从链接中解析单集 ID: {args.url}")
+        log("链接格式应为 https://www.xiaoyuzhoufm.com/episode/<eid>")
         return 2
     eid = m.group(1)
     page_url = PAGE_URL.format(eid=eid)
@@ -554,10 +553,10 @@ def main(argv: list | None = None, stop_check=None) -> int:
     meta = parse_page(html)
 
     if not meta["audio_url"]:
-        print("未找到音频地址(og:audio)。该单集可能需要登录或已被删除。")
+        log("未找到音频地址(og:audio)。该单集可能需要登录或已被删除。")
         return 1
     if not meta["episode_title"]:
-        print("未能解析出单集标题, 页面结构可能已变化。")
+        log("未能解析出单集标题, 页面结构可能已变化。")
         return 1
 
     log(f"单集: {meta['episode_title']}  |  播客: {meta['podcast'] or '未知'}")
@@ -590,7 +589,8 @@ def main(argv: list | None = None, stop_check=None) -> int:
     if audio_path is None:
         log(f"未下载音频, 仅生成元数据: {md_path}")
         write_markdown(meta, iter(()), md_path, None, podcast_info, stop_check)
-        print(f"\n✅ 完成 (元数据模式): {md_path}")
+        log("✅ 完成 (元数据模式)")
+        log(f"Markdown: {md_path}")
         return 0
 
     try:
@@ -598,10 +598,10 @@ def main(argv: list | None = None, stop_check=None) -> int:
                               args.limit_minutes, args.condition)
         count = write_markdown(meta, segments, md_path, audio_name,
                                podcast_info, stop_check)
-        print(f"\n✅ 完成! 共 {count} 段文字稿")
-        print(f"   Markdown: {md_path}")
+        log(f"✅ 完成! 共 {count} 段文字稿")
+        log(f"Markdown: {md_path}")
         if audio_name:
-            print(f"   音频: {audio_path}")
+            log(f"音频: {audio_path}")
         return 0
     except StopTranscription:
         log("已停止, 已转写的部分保存在文件中")
