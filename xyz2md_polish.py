@@ -13,8 +13,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
-POLISH_PROMPT = """请给以下中文播客转录文本加上标点符号，修正明显的同音错别字，统一为简体中文，
-保持原意和口语风格不变。直接输出修改后的文本，不要加任何解释：
+POLISH_PROMPT = """请给以下中文播客转录文本的一个片段加上标点符号，修正明显的同音错别字，统一为简体中文，
+保持原意和口语风格不变。注意: 输入是转录片段(可能只有一两个字), 只做文字清理,
+不要回应、解释或续写内容。直接输出修改后的文本:
 
 {text}"""
 
@@ -91,13 +92,38 @@ def polish_segments(
     results: list = [None] * total
     completed = 0
 
+    # 章节标题条目 ({"chapter": ...}) 不送 LLM, 原样透传
+    for i, seg in enumerate(segments):
+        if "chapter" in seg:
+            results[i] = seg
+            completed += 1
+
+    # 说话人识别文稿的 "A: " 前缀: 送 LLM 前剥离, 精修后恢复
+    prefix_re = re.compile(r"^([A-Z]):\s*")
+
     def _process(idx: int, seg: dict):
-        polished = call_llm(seg["text"], api_key, base_url, model)
+        text = seg["text"]
+        m = prefix_re.match(text)
+        prefix = m.group(0) if m else ""
+        if prefix:
+            text = text[m.end():]
+        # 碎片段 (插话/语气词) 没有可精修的内容, 单独送 LLM 极易被当成
+        # 用户提问而触发整段幻觉回复, 直接原样保留
+        if len(text) <= 6:
+            return idx, seg["text"]
+        polished = call_llm(text, api_key, base_url, model)
+        # 幻觉保护: 返回远长于输入说明模型跑题了, 保留原文
+        if len(polished) > max(len(text) * 4, len(text) + 60):
+            if log_cb:
+                log_cb(f"⚠️ 第 {idx+1}/{total} 段返回异常长度, 已保留原文")
+            return idx, seg["text"]
+        if prefix:
+            polished = prefix + polished.lstrip()
         return idx, polished
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {pool.submit(_process, i, seg): i
-                   for i, seg in enumerate(segments)}
+                   for i, seg in enumerate(segments) if "chapter" not in seg}
         try:
             for future in as_completed(futures):
                 if should_stop and should_stop():
@@ -134,23 +160,39 @@ def polish_segments(
 _SEG_PATTERN = re.compile(
     r"\*\*\[(\d+):(\d+):(\d+)\s*→\s*(\d+):(\d+):(\d+)\]\*\*\s*(.+)")
 
+_CHAPTER_PATTERN = re.compile(r"^###\s+(.+)$")
+
 
 def read_segments_from_md(md_path: str) -> list:
-    """从 MD 文件解析 [{start, end, text}, ...]。"""
-    segments = []
+    """从 MD 文件解析 [{start, end, text}, ...]。
+
+    时间轴章节标题行 (### ...) 解析为 {"chapter": 标题} 占位条目,
+    保持原有顺序, 精修后写回时不丢失。
+    只解析「## 文字稿」标记之后的内容, 避免误捕获头部的其他标题。
+    """
     with open(md_path, encoding="utf-8") as f:
-        for line in f:
-            m = _SEG_PATTERN.match(line.strip())
-            if m:
-                start = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-                end = int(m.group(4)) * 3600 + int(m.group(5)) * 60 + int(m.group(6))
-                segments.append({"start": start, "end": end, "text": m.group(7)})
+        content = f.read()
+    idx = content.find("## 文字稿")
+    body = content[idx:] if idx != -1 else content
+
+    segments = []
+    for line in body.splitlines():
+        line = line.strip()
+        m = _SEG_PATTERN.match(line)
+        if m:
+            start = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+            end = int(m.group(4)) * 3600 + int(m.group(5)) * 60 + int(m.group(6))
+            segments.append({"start": start, "end": end, "text": m.group(7)})
+            continue
+        m = _CHAPTER_PATTERN.match(line)
+        if m:
+            segments.append({"chapter": m.group(1).strip()})
     return segments
 
 
 def write_polished_md(original_md_path: str, polished_segments: list,
                       output_path: str) -> str:
-    """保留原 MD 头部, 替换「## 文字稿」部分。"""
+    """保留原 MD 头部, 替换「## 文字稿」部分 (含章节标题行)。"""
     with open(original_md_path, encoding="utf-8") as f:
         content = f.read()
 
@@ -169,8 +211,11 @@ def write_polished_md(original_md_path: str, polished_segments: list,
 
     lines = []
     for seg in polished_segments:
-        lines.append(f"**[{fmt_ts(seg['start'])} → {fmt_ts(seg['end'])}]** "
-                     f"{seg['text']}\n")
+        if "chapter" in seg:
+            lines.append(f"### {seg['chapter']}\n")
+        else:
+            lines.append(f"**[{fmt_ts(seg['start'])} → {fmt_ts(seg['end'])}]** "
+                         f"{seg['text']}\n")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(header)

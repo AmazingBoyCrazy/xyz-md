@@ -107,6 +107,8 @@ python -m venv .venv
 | `--limit-minutes N` | 只转写前 N 分钟（快速预览/测试） |
 | `--lang zh` | 指定语言，默认自动检测 |
 | `--condition` | 允许模型参考前文（长音频可能产生重复文本，默认关闭） |
+| `--diarize` | 说话人识别：本地声纹分离，文字稿标注 `A:` / `B:`（首次运行自动下载约 33MB 模型） |
+| `--speakers N` | 说话人数，`0`=自动估计（默认）；双人对谈建议 `2` |
 
 ### 示例
 
@@ -116,6 +118,9 @@ python -m venv .venv
 
 # 只转写前 10 分钟（快速验证）
 .\.venv\Scripts\python xyz2md.py <链接> --limit-minutes 10
+
+# 双人对谈播客, 带说话人识别 (文字稿输出 "A: ..." / "B: ...")
+.\.venv\Scripts\python xyz2md.py <链接> --diarize --speakers 2
 
 # 换用更高精度模型
 .\.venv\Scripts\python xyz2md.py <链接> --model medium
@@ -141,6 +146,17 @@ python -m venv .venv
 $env:HF_ENDPOINT = "https://hf-mirror.com"
 ```
 
+### 说话人识别（--diarize）
+
+- 原理：[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 本地声纹分离
+  （pyannote 分割 + 3D-Speaker 中文声纹，纯 CPU），按**词级时间戳**把文字稿切分为
+  `A:` / `B:` 说话人块；LLM 精修时会自动保留说话人前缀
+- 速度：约为音频时长的 15–20%（3 小时节目额外约 25–35 分钟）
+- 内存（实测）：10 分钟测试约 1.8GB；3 小时完整转写峰值约 2.5GB，
+  4GB 内存的机器即可运行
+- 准确率：双人对谈约 90%；分离失败会自动降级为普通转写，不中断任务
+- 设计细节见 `SPEAKER_SPEC.md`
+
 ## 打包成 exe（桌面软件）
 
 ```powershell
@@ -150,6 +166,7 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
   --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime `
   --collect-all av --collect-all huggingface_hub --collect-all tokenizers `
   --collect-all customtkinter --collect-all PIL --collect-data opencc `
+  --collect-all sherpa_onnx `
   --add-data "D:\ADP\dsh\dshwork\xyz2md\xyz2md.py;." `
   --add-data "D:\ADP\dsh\dshwork\xyz2md\xyz2md_polish.py;." `
   --hidden-import xyz2md --hidden-import xyz2md_polish `

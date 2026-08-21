@@ -105,7 +105,8 @@ class App(ctk.CTk):
         self._show(self.config_page)
 
     def _start_convert(self) -> None:
-        url, model, out_dir, limit, lang, no_audio = self.config_page.collect_args()
+        (url, model, out_dir, limit, lang, no_audio,
+         diarize, speakers) = self.config_page.collect_args()
         if not url:
             messagebox.showwarning("提示", "请先粘贴小宇宙单集链接")
             return
@@ -122,6 +123,10 @@ class App(ctk.CTk):
             cmd += ["--lang", lang]
         if no_audio:
             cmd += ["--no-audio"]
+        if diarize:
+            cmd += ["--diarize"]
+            if speakers > 0:
+                cmd += ["--speakers", str(speakers)]
 
         self.stop_event.clear()
         self.final_code = 0
@@ -323,7 +328,7 @@ class ConfigPage(ctk.CTkFrame):
         ctk.CTkLabel(card_opt, text="可选参数", font=ctk.CTkFont(weight="bold"),
                      anchor="w").pack(fill="x", padx=16, pady=(14, 4))
         row_opt = ctk.CTkFrame(card_opt, fg_color="transparent")
-        row_opt.pack(fill="x", padx=16, pady=(0, 12))
+        row_opt.pack(fill="x", padx=16, pady=(0, 6))
         self.limit_var = ctk.StringVar()
         self.lang_var = ctk.StringVar()
         ctk.CTkLabel(row_opt, text="只转前").pack(side="left")
@@ -333,6 +338,23 @@ class ConfigPage(ctk.CTkFrame):
         ctk.CTkLabel(row_opt, text="语言").pack(side="left")
         ctk.CTkEntry(row_opt, textvariable=self.lang_var, width=72,
                      placeholder_text="zh").pack(side="left", padx=(6, 0))
+
+        row_spk = ctk.CTkFrame(card_opt, fg_color="transparent")
+        row_spk.pack(fill="x", padx=16, pady=(0, 12))
+        self.diarize_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(row_spk, text="说话人识别",
+                        variable=self.diarize_var).pack(side="left")
+        self.speakers_var = ctk.StringVar(value="自动")
+        self.speakers_box = ctk.CTkComboBox(
+            row_spk, variable=self.speakers_var, width=88, height=30,
+            values=["自动", "2", "3", "4"],
+            command=lambda _v: self._on_diarize_change())
+        self.speakers_box.pack(side="left", padx=(12, 4))
+        ctk.CTkLabel(row_spk, text="人",
+                     text_color=("gray40", "gray60")).pack(side="left")
+        ctk.CTkLabel(row_spk, text="(本地声纹, 文字稿标注 A/B, 双人对谈建议选 2)",
+                     text_color=("gray40", "gray60")).pack(side="left", padx=(10, 0))
+        self._on_diarize_change()
 
         ctk.CTkButton(self, text="🚀 开始转换", height=44,
                       font=ctk.CTkFont(size=15, weight="bold"),
@@ -350,6 +372,10 @@ class ConfigPage(ctk.CTkFrame):
         if d:
             self.out_var.set(d)
 
+    def _on_diarize_change(self) -> None:
+        state = "normal" if self.diarize_var.get() else "disabled"
+        self.speakers_box.configure(state=state)
+
     def collect_args(self) -> tuple:
         url = self.url_var.get().strip()
         model = self.model_var.get().strip() or "small"
@@ -357,13 +383,18 @@ class ConfigPage(ctk.CTkFrame):
         limit = self.limit_var.get().strip()
         lang = self.lang_var.get().strip()
         no_audio = bool(self.noaudio_var.get())
+        diarize = bool(self.diarize_var.get())
+        speakers_txt = self.speakers_var.get().strip()
+        speakers = 0
+        if speakers_txt.isdigit():
+            speakers = int(speakers_txt)
         if limit:
             try:
                 float(limit)
             except ValueError:
                 messagebox.showwarning("提示", "「只转前N分钟」需要填数字")
-                return ("",) * 6
-        return url, model, out_dir, limit, lang, no_audio
+                return ("",) * 8
+        return url, model, out_dir, limit, lang, no_audio, diarize, speakers
 
 
 class ProgressPage(ctk.CTkFrame):
@@ -563,6 +594,10 @@ class ProgressPage(ctk.CTkFrame):
             ("使用分批转写引擎", "准备转写..."),
             ("仅转写前", "仅转写前若干分钟..."),
             ("未下载音频", "仅生成元数据..."),
+            ("下载说话人分割模型", "下载说话人分割模型(仅首次)..."),
+            ("下载说话人声纹模型", "下载说话人声纹模型(仅首次)..."),
+            ("说话人分离中", "说话人分离中(本地声纹)..."),
+            ("说话人分离完成", "说话人分离完成"),
         ]:
             if key in line:
                 self.status_label.configure(text=text)
@@ -918,6 +953,13 @@ def main() -> int:
                 app.config_page.model_var.set(v)
             elif k == "--out":
                 app.config_page.out_var.set(v)
+            elif k == "--speakers":
+                app.config_page.speakers_var.set(v)
+        # 无值布尔标志
+        for flag in rest[1:]:
+            if flag == "--diarize":
+                app.config_page.diarize_var.set(True)
+                app.config_page._on_diarize_change()
         app.after(300, app._start_convert)
 
     app.mainloop()
